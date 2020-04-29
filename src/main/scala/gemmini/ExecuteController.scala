@@ -5,6 +5,7 @@ import chisel3.util._
 import GemminiISA._
 import Util._
 import freechips.rocketchip.config.Parameters
+import midas.targetutils.FpgaDebug
 
 // TODO do we still need to flush when the dataflow is weight stationary? Won't the result just keep travelling through on its own?
 class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: GemminiArrayConfig[T, U])
@@ -54,6 +55,8 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   // STATE defines
   val waiting_for_cmd :: compute :: flush :: flushing :: Nil = Enum(4)
   val control_state = RegInit(waiting_for_cmd)
+
+  FpgaDebug(control_state)
 
   // Instruction-related variables
   val current_dataflow = if (dataflow == Dataflow.BOTH) Reg(UInt(1.W)) else dataflow.id.U
@@ -118,6 +121,13 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   val mesh = Module(new MeshWithDelays(inputType, outputType, accType, mesh_tag, dataflow, pe_latency,
     tileRows, tileColumns, meshRows, meshColumns, shifter_banks, shifter_banks))
 
+  FpgaDebug(mesh.io.a.valid)
+  FpgaDebug(mesh.io.a.ready)
+  FpgaDebug(mesh.io.b.valid)
+  FpgaDebug(mesh.io.b.ready)
+  FpgaDebug(mesh.io.d.valid)
+  FpgaDebug(mesh.io.d.ready)
+
   mesh.io.a.valid := false.B
   mesh.io.b.valid := false.B
   mesh.io.d.valid := false.B
@@ -180,10 +190,18 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   val performing_single_mul = WireInit(perform_single_mul && control_state === compute)
   val performing_mul_pre = WireInit(perform_mul_pre && control_state === compute)
 
+  FpgaDebug(perform_single_preload)
+  FpgaDebug(perform_single_mul)
+  FpgaDebug(perform_mul_pre)
+
   // Fire counters which resolve same-bank accesses
   val a_fire_counter = Reg(UInt(log2Up(block_size).W))
   val b_fire_counter = Reg(UInt(log2Up(block_size).W))
   val d_fire_counter = Reg(UInt(log2Up(block_size).W))
+
+  FpgaDebug(a_fire_counter)
+  FpgaDebug(b_fire_counter)
+  FpgaDebug(d_fire_counter)
 
   // These "*_fire_started" variables are only needed for 2x2 systolic arrays
   val a_fire_started = RegInit(false.B)

@@ -2,11 +2,10 @@ package gemmini
 
 import chisel3._
 import chisel3.util._
-
 import freechips.rocketchip.tile.RoCCCommand
-
 import GemminiISA._
 import Util._
+import midas.targetutils.FpgaDebug
 
 // TODO unify this class with GemminiCmdWithDeps
 class ROBIssue[T <: Data](cmd_t: T, nEntries: Int) extends Bundle {
@@ -226,6 +225,19 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
     cycles_since_issue := cycles_since_issue + 1.U
   }
   assert(cycles_since_issue < 10000.U, "pipeline stall")
+
+  entries.foreach { e =>
+    FpgaDebug(e.valid)
+    FpgaDebug(e.bits.q)
+    FpgaDebug(e.bits.cmd.inst.funct)
+  }
+
+  FpgaDebug(io.issue.ld.valid)
+  FpgaDebug(io.issue.ld.ready)
+  FpgaDebug(io.issue.st.valid)
+  FpgaDebug(io.issue.st.ready)
+  FpgaDebug(io.issue.ex.valid)
+  FpgaDebug(io.issue.ex.ready)
 
   val cntr = Counter(10000000)
   when (cntr.inc()) {
