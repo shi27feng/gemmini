@@ -226,18 +226,55 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
   }
   assert(cycles_since_issue < 10000.U, "pipeline stall")
 
+  val cycles_where_ex_issue_wasnt_made_despite_being_ready = RegInit(0.U(32.W))
+  when (/*io.issue.ld.fire() || io.issue.st.fire() ||*/ io.issue.ex.fire() || !io.busy ||
+    /*!io.issue.ld.ready || !io.issue.st.ready ||*/ !io.issue.ex.ready) {
+    cycles_where_ex_issue_wasnt_made_despite_being_ready := 0.U
+  }.otherwise {
+    cycles_where_ex_issue_wasnt_made_despite_being_ready := cycles_where_ex_issue_wasnt_made_despite_being_ready + 1.U
+  }
+
+  val cycles_where_ld_issue_wasnt_made_despite_being_ready = RegInit(0.U(32.W))
+  when (io.issue.ld.fire() || !io.busy || !io.issue.ld.ready) {
+    cycles_where_ld_issue_wasnt_made_despite_being_ready := 0.U
+  }.otherwise {
+    cycles_where_ld_issue_wasnt_made_despite_being_ready := cycles_where_ld_issue_wasnt_made_despite_being_ready + 1.U
+  }
+
+  val cycles_where_st_issue_wasnt_made_despite_being_ready = RegInit(0.U(32.W))
+  when (io.issue.st.fire() || !io.busy || !io.issue.st.ready) {
+    cycles_where_st_issue_wasnt_made_despite_being_ready := 0.U
+  }.otherwise {
+    cycles_where_st_issue_wasnt_made_despite_being_ready := cycles_where_st_issue_wasnt_made_despite_being_ready + 1.U
+  }
+
   entries.foreach { e =>
     FpgaDebug(e.valid)
     FpgaDebug(e.bits.q)
     FpgaDebug(e.bits.cmd.inst.funct)
+    FpgaDebug(e.bits.deps)
+    FpgaDebug(e.bits.op1)
+    FpgaDebug(e.bits.op2)
+    FpgaDebug(e.bits.dst)
+    FpgaDebug(e.bits.issued)
   }
 
   FpgaDebug(io.issue.ld.valid)
   FpgaDebug(io.issue.ld.ready)
+  FpgaDebug(io.issue.ld.rob_id)
   FpgaDebug(io.issue.st.valid)
   FpgaDebug(io.issue.st.ready)
+  FpgaDebug(io.issue.st.rob_id)
   FpgaDebug(io.issue.ex.valid)
   FpgaDebug(io.issue.ex.ready)
+  FpgaDebug(io.issue.ex.rob_id)
+
+  FpgaDebug(io.alloc)
+
+  FpgaDebug(cycles_since_issue)
+  FpgaDebug(cycles_where_ld_issue_wasnt_made_despite_being_ready)
+  FpgaDebug(cycles_where_st_issue_wasnt_made_despite_being_ready)
+  FpgaDebug(cycles_where_ex_issue_wasnt_made_despite_being_ready)
 
   val cntr = Counter(10000000)
   when (cntr.inc()) {
