@@ -190,12 +190,12 @@ class Scratchpad[T <: Data: Arithmetic, U <: Data](config: GemminiArrayConfig[T,
 
     FpgaDebug(writer.module.io.req.valid)
     FpgaDebug(writer.module.io.req.ready)
-    FpgaDebug(writer.module.io.busy)
+    // FpgaDebug(writer.module.io.busy)
 
     FpgaDebug(reader.module.io.req.valid)
     FpgaDebug(reader.module.io.req.ready)
     FpgaDebug(reader.module.io.req.bits.spaddr)
-    FpgaDebug(reader.module.io.req.bits.vaddr)
+    // FpgaDebug(reader.module.io.req.bits.vaddr)
     FpgaDebug(reader.module.io.resp.valid)
     FpgaDebug(reader.module.io.resp.bits.bytes_read)
 

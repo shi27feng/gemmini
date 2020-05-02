@@ -234,14 +234,14 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
     cycles_where_ex_issue_wasnt_made_despite_being_ready := cycles_where_ex_issue_wasnt_made_despite_being_ready + 1.U
   }
 
-  val cycles_where_ld_issue_wasnt_made_despite_being_ready = RegInit(0.U(32.W))
+  val cycles_where_ld_issue_wasnt_made_despite_being_ready = RegInit(0.U(24.W))
   when (io.issue.ld.fire() || !io.busy || !io.issue.ld.ready) {
     cycles_where_ld_issue_wasnt_made_despite_being_ready := 0.U
   }.otherwise {
     cycles_where_ld_issue_wasnt_made_despite_being_ready := cycles_where_ld_issue_wasnt_made_despite_being_ready + 1.U
   }
 
-  val cycles_where_st_issue_wasnt_made_despite_being_ready = RegInit(0.U(32.W))
+  val cycles_where_st_issue_wasnt_made_despite_being_ready = RegInit(0.U(24.W))
   when (io.issue.st.fire() || !io.busy || !io.issue.st.ready) {
     cycles_where_st_issue_wasnt_made_despite_being_ready := 0.U
   }.otherwise {
@@ -250,13 +250,16 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
 
   entries.foreach { e =>
     FpgaDebug(e.valid)
-    FpgaDebug(e.bits.q)
+    // FpgaDebug(e.bits.q)
     FpgaDebug(e.bits.cmd.inst.funct)
-    FpgaDebug(e.bits.deps)
     FpgaDebug(e.bits.op1)
     FpgaDebug(e.bits.op2)
     FpgaDebug(e.bits.dst)
     FpgaDebug(e.bits.issued)
+  }
+
+  entries.take(3).foreach { e =>
+    FpgaDebug(e.bits.deps)
   }
 
   FpgaDebug(io.issue.ld.valid)
