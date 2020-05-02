@@ -194,10 +194,10 @@ class Scratchpad[T <: Data: Arithmetic, U <: Data](config: GemminiArrayConfig[T,
 
     FpgaDebug(reader.module.io.req.valid)
     FpgaDebug(reader.module.io.req.ready)
-    FpgaDebug(reader.module.io.req.bits.spaddr)
+    // FpgaDebug(reader.module.io.req.bits.spaddr)
     // FpgaDebug(reader.module.io.req.bits.vaddr)
     FpgaDebug(reader.module.io.resp.valid)
-    FpgaDebug(reader.module.io.resp.bits.bytes_read)
+    // FpgaDebug(reader.module.io.resp.bits.bytes_read)
 
     val write_dispatch_q = Queue(io.dma.write.req)
 

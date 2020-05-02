@@ -31,13 +31,13 @@ class StoreController[T <: Data : Arithmetic, U <: Data](config: GemminiArrayCon
   val waiting_for_command :: waiting_for_dma_req_ready :: sending_rows :: Nil = Enum(3)
   val control_state = RegInit(waiting_for_command)
 
-  FpgaDebug(control_state)
+  // FpgaDebug(control_state)
 
   val stride = RegInit((sp_width / 8).U(coreMaxAddrBits.W))
   val block_rows = meshRows * tileRows
   val row_counter = RegInit(0.U(log2Ceil(block_rows).W))
 
-  FpgaDebug(row_counter)
+  // FpgaDebug(row_counter)
 
   val cmd = Queue(io.cmd, st_queue_length)
   val vaddr = cmd.bits.cmd.rs1

@@ -217,7 +217,7 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
   dontTouch(pop_count_packed_deps)
   dontTouch(min_pop_count)
 
-  val cycles_since_issue = RegInit(0.U(32.W))
+  val cycles_since_issue = RegInit(0.U(16.W))
 
   when (io.issue.ld.fire() || io.issue.st.fire() || io.issue.ex.fire() || !io.busy) {
     cycles_since_issue := 0.U
@@ -226,23 +226,26 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
   }
   assert(cycles_since_issue < 10000.U, "pipeline stall")
 
-  val cycles_where_ex_issue_wasnt_made_despite_being_ready = RegInit(0.U(32.W))
-  when (/*io.issue.ld.fire() || io.issue.st.fire() ||*/ io.issue.ex.fire() || !io.busy ||
+  val ex_cmd_exists = entries.map(e => e.valid && e.bits.q === exq && !e.bits.issued).reduce(_ || _)
+  val cycles_where_ex_issue_wasnt_made_despite_being_ready = RegInit(0.U(16.W))
+  when (/*io.issue.ld.fire() || io.issue.st.fire() ||*/ io.issue.ex.fire() || !ex_cmd_exists ||
     /*!io.issue.ld.ready || !io.issue.st.ready ||*/ !io.issue.ex.ready) {
     cycles_where_ex_issue_wasnt_made_despite_being_ready := 0.U
   }.otherwise {
     cycles_where_ex_issue_wasnt_made_despite_being_ready := cycles_where_ex_issue_wasnt_made_despite_being_ready + 1.U
   }
 
-  val cycles_where_ld_issue_wasnt_made_despite_being_ready = RegInit(0.U(24.W))
-  when (io.issue.ld.fire() || !io.busy || !io.issue.ld.ready) {
+  val ld_cmd_exists = entries.map(e => e.valid && e.bits.q === ldq && !e.bits.issued).reduce(_ || _)
+  val cycles_where_ld_issue_wasnt_made_despite_being_ready = RegInit(0.U(16.W))
+  when (io.issue.ld.fire() || !ld_cmd_exists || !io.issue.ld.ready) {
     cycles_where_ld_issue_wasnt_made_despite_being_ready := 0.U
   }.otherwise {
     cycles_where_ld_issue_wasnt_made_despite_being_ready := cycles_where_ld_issue_wasnt_made_despite_being_ready + 1.U
   }
 
-  val cycles_where_st_issue_wasnt_made_despite_being_ready = RegInit(0.U(24.W))
-  when (io.issue.st.fire() || !io.busy || !io.issue.st.ready) {
+  val st_cmd_exists = entries.map(e => e.valid && e.bits.q === stq && !e.bits.issued).reduce(_ || _)
+  val cycles_where_st_issue_wasnt_made_despite_being_ready = RegInit(0.U(16.W))
+  when (io.issue.st.fire() || !st_cmd_exists || !io.issue.st.ready) {
     cycles_where_st_issue_wasnt_made_despite_being_ready := 0.U
   }.otherwise {
     cycles_where_st_issue_wasnt_made_despite_being_ready := cycles_where_st_issue_wasnt_made_despite_being_ready + 1.U
@@ -258,7 +261,7 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
     FpgaDebug(e.bits.issued)
   }
 
-  entries.take(3).foreach { e =>
+  entries.take(7).foreach { e =>
     FpgaDebug(e.bits.deps)
   }
 
@@ -272,12 +275,18 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
   FpgaDebug(io.issue.ex.ready)
   FpgaDebug(io.issue.ex.rob_id)
 
-  FpgaDebug(io.alloc)
+  FpgaDebug(io.alloc.valid)
+  FpgaDebug(io.alloc.ready)
+  FpgaDebug(io.alloc.bits.inst.funct)
+  FpgaDebug(io.alloc.bits.inst.rs1)
+  FpgaDebug(io.alloc.bits.inst.rs2)
 
   FpgaDebug(cycles_since_issue)
   FpgaDebug(cycles_where_ld_issue_wasnt_made_despite_being_ready)
   FpgaDebug(cycles_where_st_issue_wasnt_made_despite_being_ready)
   FpgaDebug(cycles_where_ex_issue_wasnt_made_despite_being_ready)
+
+  FpgaDebug(clock.asUInt())
 
   val cntr = Counter(10000000)
   when (cntr.inc()) {

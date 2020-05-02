@@ -25,12 +25,12 @@ class LoadController[T <: Data, U <: Data](config: GemminiArrayConfig[T, U], cor
   FpgaDebug(io.dma.req.valid)
   FpgaDebug(io.dma.req.ready)
   FpgaDebug(io.dma.resp.valid)
-  FpgaDebug(io.dma.resp.bits.bytesRead)
+  // FpgaDebug(io.dma.resp.bits.bytesRead)
 
   val waiting_for_command :: waiting_for_dma_req_ready :: sending_rows :: Nil = Enum(3)
   val control_state = RegInit(waiting_for_command)
 
-  FpgaDebug(control_state)
+  // FpgaDebug(control_state)
 
   val stride = RegInit((sp_width / 8).U(coreMaxAddrBits.W))
   val scale = Reg(UInt(mvin_scale_t_bits.W))
@@ -38,7 +38,7 @@ class LoadController[T <: Data, U <: Data](config: GemminiArrayConfig[T, U], cor
   val block_cols = meshColumns * tileColumns
   val row_counter = RegInit(0.U(log2Ceil(block_rows).W))
 
-  FpgaDebug(row_counter)
+  // FpgaDebug(row_counter)
 
   val cmd = Queue(io.cmd, ld_queue_length)
   val vaddr = cmd.bits.cmd.rs1
