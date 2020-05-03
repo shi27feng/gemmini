@@ -273,7 +273,7 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
     FpgaDebug(e.bits.issued)
   }
 
-  entries.take(7).foreach { e =>
+  entries.take(3).foreach { e =>
     FpgaDebug(e.bits.deps)
   }
 
@@ -297,6 +297,8 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
   FpgaDebug(cycles_where_ld_issue_wasnt_made_despite_being_ready)
   FpgaDebug(cycles_where_st_issue_wasnt_made_despite_being_ready)
   FpgaDebug(cycles_where_ex_issue_wasnt_made_despite_being_ready)
+
+  FpgaDebug(utilization)
 
   FpgaDebug(clock.asUInt())
 
