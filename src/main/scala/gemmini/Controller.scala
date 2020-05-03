@@ -193,6 +193,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data]
   FpgaDebug(io.cmd.valid)
   FpgaDebug(io.cmd.ready)
   FpgaDebug(io.cmd.bits.inst.funct)
+  FpgaDebug(io.cmd.bits.status)
   FpgaDebug(unrolled_cmd.valid)
   FpgaDebug(unrolled_cmd.ready)
   FpgaDebug(unrolled_cmd.bits.inst.funct)

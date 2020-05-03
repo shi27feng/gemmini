@@ -224,7 +224,7 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
   }.elsewhen(io.busy) {
     cycles_since_issue := cycles_since_issue + 1.U
   }
-  assert(cycles_since_issue < 10000.U, "pipeline stall")
+  // assert(cycles_since_issue < 10000.U, "pipeline stall")
 
   val ex_cmd_exists = entries.map(e => e.valid && e.bits.q === exq && !e.bits.issued).reduce(_ || _)
   val cycles_where_ex_issue_wasnt_made_despite_being_ready = RegInit(0.U(16.W))
@@ -254,7 +254,7 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
   val preload_cmd_exists = entries.map(e => e.valid && e.bits.cmd.inst.funct === PRELOAD_CMD).reduce(_ || _)
   val no_compute_cmd_exists = !entries.map(e => e.valid &&
     (e.bits.cmd.inst.funct === COMPUTE_AND_STAY_CMD || e.bits.cmd.inst.funct === COMPUTE_AND_FLIP_CMD)).reduce(_ || _)
-  val orphan_preload_exists = preload_cmd_exists && !no_compute_cmd_exists
+  val orphan_preload_exists = preload_cmd_exists && no_compute_cmd_exists
   val orphan_preload_counter = RegInit(0.U(16.W))
   when (orphan_preload_exists) {
     orphan_preload_counter := orphan_preload_counter + 1.U
@@ -300,7 +300,8 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
 
   FpgaDebug(utilization)
 
-  FpgaDebug(clock.asUInt())
+  val clock_uint = WireInit(clock.asUInt())
+  FpgaDebug(clock_uint)
 
   val cntr = Counter(10000000)
   when (cntr.inc()) {
