@@ -251,6 +251,18 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
     cycles_where_st_issue_wasnt_made_despite_being_ready := cycles_where_st_issue_wasnt_made_despite_being_ready + 1.U
   }
 
+  val preload_cmd_exists = entries.map(e => e.valid && e.bits.cmd.inst.funct === PRELOAD_CMD).reduce(_ || _)
+  val no_compute_cmd_exists = !entries.map(e => e.valid &&
+    (e.bits.cmd.inst.funct === COMPUTE_AND_STAY_CMD || e.bits.cmd.inst.funct === COMPUTE_AND_FLIP_CMD)).reduce(_ || _)
+  val orphan_preload_exists = preload_cmd_exists && !no_compute_cmd_exists
+  val orphan_preload_counter = RegInit(0.U(16.W))
+  when (orphan_preload_exists) {
+    orphan_preload_counter := orphan_preload_counter + 1.U
+  }.otherwise {
+    orphan_preload_counter := 0.U
+  }
+  FpgaDebug(orphan_preload_counter)
+
   entries.foreach { e =>
     FpgaDebug(e.valid)
     // FpgaDebug(e.bits.q)
