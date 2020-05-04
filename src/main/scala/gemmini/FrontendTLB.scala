@@ -8,6 +8,7 @@ import freechips.rocketchip.rocket._
 import freechips.rocketchip.tile.{CoreBundle, CoreModule}
 import freechips.rocketchip.tilelink.TLEdgeOut
 import freechips.rocketchip.util.InOrderArbiter
+import midas.targetutils.FpgaDebug
 
 import Util._
 
@@ -88,6 +89,14 @@ class DecoupledTLB(entries: Int, maxSize: Int)(implicit edge: TLEdgeOut, p: Para
       state := Mux(io.exp.flush_retry, s_waiting_for_resp, s_idle)
     }
   }
+
+  FpgaDebug(tlb.io.resp.pf.ld)
+  FpgaDebug(tlb.io.resp.ae.ld)
+  FpgaDebug(tlb.io.resp.pf.st)
+  FpgaDebug(tlb.io.resp.ae.st)
+  FpgaDebug(tlb.io.req)
+
+  FpgaDebug(io.exp.interrupt)
 
   assert(!io.exp.flush_retry || !io.exp.flush_skip, "TLB: flushing with both retry and skip at same time")
 }
