@@ -200,6 +200,11 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data]
   FpgaDebug(raw_cmd.valid)
   FpgaDebug(raw_cmd.ready)
   FpgaDebug(raw_cmd.bits.inst.funct)
+  FpgaDebug(io.busy)
+  FpgaDebug(raw_cmd.valid)
+  FpgaDebug(unrolled_cmd.valid)
+  FpgaDebug(spad.module.io.busy)
+  FpgaDebug(rob.io.busy)
 
   // Issue commands to controllers
   // TODO we combinationally couple cmd.ready and cmd.valid signals here
