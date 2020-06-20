@@ -38,7 +38,8 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     val rob_id = UDValid(UInt(log2Up(rob_entries).W))
     val addr = local_addr_t.cloneType
     val rows = UInt(log2Up(block_size + 1).W)
-    val cols = UInt(log2Up(block_size + 1).W)
+    //val cols = UInt(log2Up(block_size + 1).W)
+    val cols = UInt(16.W)
 
     override def make_this_garbage(dummy: Int = 0): Unit = {
       rob_id.valid := false.B
@@ -98,9 +99,27 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   val a_rows = rs1s(a_address_place)(48 + log2Up(block_size + 1) - 1, 48) // TODO magic numbers
   val b_cols = rs2s(0)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
   val b_rows = rs2s(0)(48 + log2Up(block_size + 1) - 1, 48) // TODO magic numbers
-  val d_cols = rs1s(preload_cmd_place)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
+  //val d_cols = rs1s(preload_cmd_place)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
+  val d_cols = rs1s(preload_cmd_place)(47, 32)
+  /*
+  val d_col = Wire(Vec(4, UInt(4.W)))
+  d_col(0) := rs1s(preload_cmd_place)(35, 32)
+  d_col(1) := rs1s(preload_cmd_place)(39, 36)
+  d_col(2) := rs1s(preload_cmd_place)(43, 40)
+  d_col(3) := rs1s(preload_cmd_place)(47, 44) // changed for sddmm
+
+   */
   val d_rows = rs1s(preload_cmd_place)(48 + log2Up(block_size + 1) - 1, 48) // TODO magic numbers
-  val c_cols = rs2s(preload_cmd_place)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
+  //val c_cols = rs2s(preload_cmd_place)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
+  val c_cols = rs2s(preload_cmd_place)(47, 32)
+  /*
+  val c_col = Wire(Vec(4, UInt(4.W)))
+  c_col(0) := rs2s(preload_cmd_place)(35, 32)
+  c_col(1) := rs2s(preload_cmd_place)(39, 36)
+  c_col(2) := rs2s(preload_cmd_place)(43, 40)
+  c_col(3) := rs2s(preload_cmd_place)(47, 44) // changed for sddmm
+
+   */
   val c_rows = rs2s(preload_cmd_place)(48 + log2Up(block_size + 1) - 1, 48) // TODO magic numbers
 
   // Dependency stuff
@@ -518,11 +537,15 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
 
     val a_unpadded_cols = UInt(log2Up(block_size + 1).W)
     val b_unpadded_cols = UInt(log2Up(block_size + 1).W)
-    val d_unpadded_cols = UInt(log2Up(block_size + 1).W)
+    //val d_unpadded_cols = UInt(log2Up(block_size + 1).W)
+    val d_unpadded_cols = UInt(16.W)
+    //val d_unpadded_col_vec = Vec(4, UInt(4.W))
 
     val c_addr = local_addr_t.cloneType
     val c_rows = UInt(log2Up(block_size + 1).W)
-    val c_cols = UInt(log2Up(block_size + 1).W)
+    //val c_cols = UInt(log2Up(block_size + 1).W)
+    val c_cols = UInt(16.W)
+    //val c_col_vec = Vec(4, UInt(4.W))
 
     val rob_id = UDValid(UInt(log2Up(rob_entries).W))
 
@@ -559,6 +582,7 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   mesh_cntl_signals_q.io.enq.bits.a_unpadded_cols := Mux(a_row_is_not_all_zeros, a_cols, 0.U)
   mesh_cntl_signals_q.io.enq.bits.b_unpadded_cols := Mux(b_row_is_not_all_zeros, b_cols, 0.U)
   mesh_cntl_signals_q.io.enq.bits.d_unpadded_cols := Mux(d_row_is_not_all_zeros, d_cols, 0.U)
+  //mesh_cntl_signals_q.io.enq.bits.d_unpadded_col_vec := Mux(d_row_is_not_all_zeros, d_col, 0.U)
 
   mesh_cntl_signals_q.io.enq.bits.a_fire := a_fire
   mesh_cntl_signals_q.io.enq.bits.b_fire := b_fire
@@ -567,6 +591,7 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   mesh_cntl_signals_q.io.enq.bits.c_addr := c_address_rs2
   mesh_cntl_signals_q.io.enq.bits.c_rows := c_rows
   mesh_cntl_signals_q.io.enq.bits.c_cols := c_cols
+  //mesh_cntl_signals_q.io.enq.bits.c_col_vec := c_col
 
   mesh_cntl_signals_q.io.enq.bits.rob_id.valid := !performing_single_mul && !c_address_rs2.is_garbage()
   mesh_cntl_signals_q.io.enq.bits.rob_id.bits := cmd.bits(preload_cmd_place).rob_id
@@ -595,13 +620,17 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     cntl.d_read_from_acc -> accReadValid(cntl.d_bank_acc)
   ))
 
+  val d_col_vec = cntl.d_unpadded_cols.asTypeOf(Vec(4, UInt(4.W)))
+
   val dataA_unpadded = Mux(cntl.a_read_from_acc, accReadData(cntl.a_bank_acc), readData(cntl.a_bank))
   val dataB_unpadded = MuxCase(readData(cntl.b_bank), Seq(cntl.accumulate_zeros -> 0.U, cntl.b_read_from_acc -> accReadData(cntl.b_bank_acc)))
   val dataD_unpadded = MuxCase(readData(cntl.d_bank), Seq(cntl.preload_zeros -> 0.U, cntl.d_read_from_acc -> accReadData(cntl.d_bank_acc)))
 
   val dataA = VecInit(dataA_unpadded.asTypeOf(Vec(block_size, inputType)).zipWithIndex.map { case (d, i) => Mux(i.U < cntl.a_unpadded_cols, d, inputType.zero)})
   val dataB = VecInit(dataB_unpadded.asTypeOf(Vec(block_size, inputType)).zipWithIndex.map { case (d, i) => Mux(i.U < cntl.b_unpadded_cols, d, inputType.zero)})
-  val dataD = VecInit(dataD_unpadded.asTypeOf(Vec(block_size, inputType)).zipWithIndex.map { case (d, i) => Mux(i.U < cntl.d_unpadded_cols, d, inputType.zero)})
+  //val dataD = VecInit(dataD_unpadded.asTypeOf(Vec(block_size, inputType)).zipWithIndex.map { case (d, i) => Mux(i.U < cntl.d_unpadded_cols, d, inputType.zero)})
+  //changed for sddmm
+  val dataD = VecInit(dataD_unpadded.asTypeOf(Vec(block_size, inputType)).zipWithIndex.map { case (d, i) => Mux(d_col_vec(i) === 1.U, d, inputType.zero)})
 
   when (cntl_valid) {
     // Default inputs
@@ -617,6 +646,7 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     mesh.io.tag_in.bits.rob_id := cntl.rob_id
     mesh.io.tag_in.bits.addr := cntl.c_addr
     mesh.io.tag_in.bits.cols := cntl.c_cols
+    //mesh.io.tag_in.bits.cols := cntl.c_col_vec.asUInt() //Todo: check
     mesh.io.tag_in.bits.rows := cntl.c_rows
   }
 
@@ -646,10 +676,13 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
 
   val w_matrix_rows = mesh.io.tag_out.rows
   val w_matrix_cols = mesh.io.tag_out.cols
+  val c_col_vec = w_matrix_cols.asTypeOf(Vec(4, UInt(4.W))) //added for sddmm
 
   val write_this_row = Mux(current_dataflow === Dataflow.WS.id.U, output_counter.value < w_matrix_rows,
     block_size.U - 1.U - output_counter.value < w_matrix_rows)
-  val w_mask = (0 until block_size).map(_.U < w_matrix_cols) // This is an element-wise mask, rather than a byte-wise mask
+//  val w_mask = (0 until block_size).map(_.U < w_matrix_cols) // This is an element-wise mask, rather than a byte-wise mask
+  val w_mask = (0 until block_size).map(c_col_vec(_) === 1.U) // This is an element-wise mask, rather than a byte-wise mask
+  //added for sddmm
 
   // Write to normal scratchpad
   for(i <- 0 until sp_banks) {
