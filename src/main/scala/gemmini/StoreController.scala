@@ -66,8 +66,10 @@ class StoreController[T <: Data : Arithmetic, U <: Data](config: GemminiArrayCon
   val cmd = Queue(io.cmd, st_queue_length)
   val vaddr = cmd.bits.cmd.rs1
   val localaddr = cmd.bits.cmd.rs2.asTypeOf(local_addr_t)
-  val cols = cmd.bits.cmd.rs2(32 + mvout_len_bits - 1, 32) // TODO magic numbers
-  val rows = cmd.bits.cmd.rs2(48 + mvout_rows_bits - 1, 48) // TODO magic numbers
+  val rows = cmd.bits.cmd.rs2(63, 56) // TODO magic numbers
+  val cols = cmd.bits.cmd.rs2(55, 48) // TODO magic numbers
+  val point = cmd.bits.cmd.rs2(32 + 16 - 1, 32) //4x4 mesh
+
   val config_stride = cmd.bits.cmd.rs2
   val config_pool_stride = cmd.bits.cmd.rs1(5, 4) // TODO magic numbers
   val config_pool_size = cmd.bits.cmd.rs1(7, 6) // TODO magic numbers
@@ -82,6 +84,7 @@ class StoreController[T <: Data : Arithmetic, U <: Data](config: GemminiArrayCon
   val mstatus = cmd.bits.cmd.status
 
   val localaddr_plus_row_counter = localaddr + row_counter
+  val point_vec = point.asTypeOf(Vec(4, UInt(4.W))) //mask divided into 4 groups
 
   val pool_row_addr = localaddr + (orow * pool_ocols +& ocol)
   when (orow_is_negative || ocol_is_negative || orow >= pool_orows || ocol >= pool_ocols) {
@@ -116,6 +119,7 @@ class StoreController[T <: Data : Arithmetic, U <: Data](config: GemminiArrayCon
   io.dma.req.bits.vaddr := Mux(pooling_is_enabled, pool_vaddr, vaddr + row_counter * stride)
   io.dma.req.bits.laddr := Mux(pooling_is_enabled, pool_row_addr, localaddr_plus_row_counter)
   io.dma.req.bits.len := cols
+  io.dma.req.bits.row_point := point_vec(row_counter).asTypeOf(Vec(4, UInt(1.W))) //4 bits mask vector
   io.dma.req.bits.status := mstatus
   io.dma.req.bits.pool_en := pooling_is_enabled && (wrow_counter =/= 0.U || wcol_counter =/= 0.U)
   io.dma.req.bits.store_en := !pooling_is_enabled ||

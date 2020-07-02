@@ -265,6 +265,7 @@ class StreamWriteRequest(val dataWidth: Int)(implicit p: Parameters) extends Cor
   // Pooling variables
   val pool_en = Bool()
   val store_en = Bool()
+  val row_point = Vec(4, UInt(1.W))
 }
 
 class StreamWriter[T <: Data: Arithmetic](nXacts: Int, beatBits: Int, maxBytes: Int, dataWidth: Int,
@@ -363,7 +364,7 @@ class StreamWriter[T <: Data: Arithmetic](nXacts: Int, beatBits: Int, maxBytes: 
           val paddr_offset = paddr(lg_s-1, 0)
 
           i.U >= paddr_offset &&
-            i.U < paddr_offset +& bytesLeft
+            i.U < paddr_offset +& bytesLeft //&& Mux((i.U-paddr_offset)>=0.U && (i.U-paddr_offset < req.len), (req.row_point(i.U - paddr_offset) === 1.U), false.B) //added
         } else {
           true.B
         } && (i < s).B
@@ -397,19 +398,25 @@ class StreamWriter[T <: Data: Arithmetic](nXacts: Int, beatBits: Int, maxBytes: 
 
     val bytes_written_this_beat = PopCount(write_mask)
 
+    //added for sampling mask
+    val mask_data_reg = RegInit(io.req.bits.data.asTypeOf(Vec(4, inputType))) //vectorized
+    val mask_data = mask_data_reg.asUInt() //instead of req.data
+
     // Firing off TileLink write requests
     val putFull = edge.Put(
       fromSource = RegEnableThru(xactId, state === s_writing_new_block),
       toAddress = write_paddr,
       lgSize = lg_write_size,
-      data = (req.data >> (bytesSent * 8.U)).asUInt()
+      //data = (req.data >> (bytesSent * 8.U)).asUInt()
+      data = (mask_data >> (bytesSent * 8.U)).asUInt()
     )._2
 
     val putPartial = edge.Put(
       fromSource = RegEnableThru(xactId, state === s_writing_new_block),
       toAddress = write_paddr,
       lgSize = lg_write_size,
-      data = ((req.data >> (bytesSent * 8.U)) << (write_shift * 8.U)).asUInt(),
+      //data = ((req.data >> (bytesSent * 8.U)) << (write_shift * 8.U)).asUInt(),
+      data = ((mask_data >> (bytesSent * 8.U)) << (write_shift * 8.U)).asUInt(),
       mask = write_mask.asUInt()
     )._2
 
@@ -469,13 +476,16 @@ class StreamWriter[T <: Data: Arithmetic](nXacts: Int, beatBits: Int, maxBytes: 
       }
 
       req := io.req.bits
-      req.data := Mux(io.req.bits.pool_en, pooled, io.req.bits.data)
-
+      //req.data := Mux(io.req.bits.pool_en, pooled, io.req.bits.data)
+      for(i <- 0 until 4){ //change to parameter
+        mask_data_reg(i) := Mux(io.req.bits.row_point(i) === 1.U, (io.req.bits.data.asTypeOf(Vec(4, inputType)))(i), 0.S)
+      }
       bytesSent := 0.U
 
       val vpn_already_translated = last_vpn_translated_valid &&
         last_vpn_translated === io.req.bits.vaddr(coreMaxAddrBits-1, pgIdxBits)
       state := Mux(io.req.bits.store_en, Mux(vpn_already_translated, s_writing_new_block, s_translate_req), s_idle)
     }
+    //val block_size = dataWidth / inputType.getWidth
   }
 }

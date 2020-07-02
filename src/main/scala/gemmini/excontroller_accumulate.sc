@@ -1,3 +1,4 @@
+/*
 package gemmini
 
 import chisel3._
@@ -6,8 +7,11 @@ import GemminiISA._
 import Util._
 import freechips.rocketchip.config.Parameters
 
+// TODO handle reads from the same bank
+// TODO don't flush all 4 time steps when shorter flushes will work
 // TODO do we still need to flush when the dataflow is weight stationary? Won't the result just keep travelling through on its own?
-class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: GemminiArrayConfig[T, U])
+// TODO allow the matmul result to not be DIM-by-DIM, similar to how the matmul inputs can be padded if they aren't DIM-by-DIM
+class ExecuteController[T <: Data](xLen: Int, tagWidth: Int, config: GemminiArrayConfig[T])
                                   (implicit p: Parameters, ev: Arithmetic[T]) extends Module {
   import config._
   import ev._
@@ -25,11 +29,14 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
       val write = Vec(acc_banks, new AccumulatorWriteIO(acc_bank_entries, Vec(meshColumns, Vec(tileColumns, accType))))
     }
 
+    val im2col = new Bundle {
+      val req = Decoupled(new Im2ColReadReq(config))
+      val resp = Flipped(Decoupled(new Im2ColReadResp(config)))
+    }
+
     val completed = Valid(UInt(log2Up(rob_entries).W))
 
     val busy = Output(Bool())
-
-    val solitary_preload = Output(Bool()) // TODO very hacky. for ROB, to prevent infinite fence stalls. remove later
   })
 
   val block_size = meshRows*tileRows
@@ -53,8 +60,6 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
 
   io.busy := false.B // cmd.valid(0)
 
-  io.solitary_preload := cmd.valid(0) && cmd.bits(0).cmd.inst.funct === PRELOAD_CMD && !cmd.valid(1)
-
   // STATE defines
   val waiting_for_cmd :: compute :: flush :: flushing :: Nil = Enum(4)
   val control_state = RegInit(waiting_for_cmd)
@@ -74,15 +79,59 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   val a_address_place = Mux(current_dataflow === Dataflow.WS.id.U, 0.U, Mux(preload_cmd_place === 0.U, 1.U, 2.U))
 
   val in_prop = functs(0) === COMPUTE_AND_FLIP_CMD
+
+
   val in_prop_flush = Reg(Bool())
   when (current_dataflow === Dataflow.WS.id.U) {
     in_prop_flush := 0.U
   }
 
+  val input_width = RegInit(0.U(10.W))
+  val weight_width = RegInit(0.U(4.W))
+  val weight_stride = RegInit(0.U(3.W))
+  val output_width = input_width - weight_width + 1.U
+  val channel = RegInit(0.U(10.W))
+  val im2col_turn = WireInit(0.U(9.W))
+  val channel_turn = WireInit(0.U(5.W))
+
   val in_shift = Reg(UInt(log2Up(accType.getWidth).W))
   val acc_shift = Reg(UInt(log2Up(accType.getWidth).W))
   val relu6_shift = Reg(UInt(log2Up(accType.getWidth).W))
   val activation = Reg(UInt(2.W))
+
+  //fix by input
+  val im2col_en = RegInit(false.B)
+
+  //Seah: added for more than 16 rows of output
+  val row_turn = ((output_width*output_width) >> 4.U).asUInt()
+  val row_turn_counter = RegInit(row_turn)
+
+  /*
+  when(weight_width === 2.U){
+    channel_turn := 4.U
+  }.elsewhen(weight_width === 3.U || weight_width === 4.U){
+    channel_turn := 1.U
+  }.otherwise{channel_turn := 0.U} //from 5x5
+*/
+  when(channel === 1.U){
+    channel_turn := 16.U
+  }.elsewhen(channel === 2.U){
+    channel_turn := 8.U
+  }.elsewhen(channel === 3.U){
+    channel_turn := 5.U
+  }.elsewhen(channel === 4.U){
+    channel_turn := 4.U
+  }.elsewhen(channel === 5.U){
+    channel_turn := 3.U
+  }.elsewhen(channel >= 6.U && channel <= 8.U){
+    channel_turn := 2.U
+  }.otherwise{channel_turn := 1.U}
+
+  val im2col_width = weight_width * weight_width * channel
+  im2col_turn := (im2col_width >> (log2Up(block_size)).U).asUInt + 1.U
+  when(im2col_width(3,0) === 0.U){
+    im2col_turn := im2col_width >> (log2Up(block_size)).U
+  }
 
   // SRAM addresses of matmul operands
   val a_address_rs1 = rs1s(a_address_place).asTypeOf(local_addr_t)
@@ -137,6 +186,10 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   mesh.io.pe_control.shift := cntl.shift
   mesh.io.flush.bits := 0.U
 
+  //Seah: added for WS accumulator prop disenable
+  val prop = WireInit(false.B)
+  val prop_lock = RegInit(false.B)
+
   // Hazards
   val raw_hazard_pre = mesh.io.tags_in_progress.map { t =>
     val is_garbage = t.addr.is_garbage()
@@ -154,35 +207,16 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     !is_garbage && (mul_raw_haz || pre_raw_haz)
   }.reduce(_ || _)
 
-  // val matmul_in_progress = mesh.io.tags_in_progress.map(_.rob_ids(0).valid).reduce(_ || _)
   val matmul_in_progress = mesh.io.tags_in_progress.map(_.rob_id.valid).reduce(_ || _)
 
   // SRAM scratchpad
-  // Fire counters which resolve same-bank accesses
-  val a_fire_counter = Reg(UInt(log2Up(block_size).W))
-  val b_fire_counter = Reg(UInt(log2Up(block_size).W))
-  val d_fire_counter = Reg(UInt(log2Up(block_size).W))
+  val dataAbank = a_address_rs1.sp_bank()
+  val dataBbank = b_address_rs2.sp_bank()
+  val dataDbank = d_address_rs1.sp_bank()
 
-  // These "*_fire_started" variables are only needed for 2x2 systolic arrays
-  val a_fire_started = RegInit(false.B)
-  val d_fire_started = RegInit(false.B)
-  val b_fire_started = RegInit(false.B)
-
-  // "A" stride variables
-  val a_addr_offset = Reg(UInt((16 + log2Up(block_size)).W))
-  val a_addr_stride = Reg(UInt(16.W))
-
-  val a_address = a_address_rs1 + a_addr_offset
-  val b_address = b_address_rs2 + b_fire_counter
-  val d_address = d_address_rs1 + (block_size.U - 1.U - d_fire_counter)
-
-  val dataAbank = a_address.sp_bank()
-  val dataBbank = b_address.sp_bank()
-  val dataDbank = d_address.sp_bank()
-
-  val dataABankAcc = a_address.acc_bank()
-  val dataBBankAcc = b_address.acc_bank()
-  val dataDBankAcc = d_address.acc_bank()
+  val dataABankAcc = a_address_rs1.acc_bank()
+  val dataBBankAcc = b_address_rs2.acc_bank()
+  val dataDBankAcc = d_address_rs1.acc_bank()
 
   val a_read_from_acc = a_address_rs1.is_acc_addr
   val b_read_from_acc = b_address_rs2.is_acc_addr
@@ -202,19 +236,34 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   val performing_single_mul = WireInit(perform_single_mul && control_state === compute)
   val performing_mul_pre = WireInit(perform_mul_pre && control_state === compute)
 
+  // Fire counters which resolve same-bank accesses
+  val a_fire_counter = Reg(UInt(log2Up(block_size).W))
+  val b_fire_counter = Reg(UInt(log2Up(block_size).W))
+  val d_fire_counter = Reg(UInt(log2Up(block_size).W))
+
+  // These "*_fire_started" variables are only needed for 2x2 systolic arrays
+  val a_fire_started = RegInit(false.B)
+  val d_fire_started = RegInit(false.B)
+  val b_fire_started = RegInit(false.B)
+
   // These variables determine whether or not the row that is currently being read should be completely padded with 0
   val a_row_is_not_all_zeros = a_fire_counter < a_rows
   val b_row_is_not_all_zeros = b_fire_counter < b_rows
   val d_row_is_not_all_zeros = block_size.U - 1.U - d_fire_counter < d_rows
 
-  def same_bank(addr1: LocalAddr, addr2: LocalAddr, start_inputting1: Bool, start_inputting2: Bool): Bool = {
+
+  val im2col_wire = io.im2col.req.ready
+
+  def same_bank(addr1: LocalAddr, addr2: LocalAddr, start_inputting1: Bool, start_inputting2: Bool, can_be_im2colled: Boolean): Bool = {
     val addr1_read_from_acc = addr1.is_acc_addr
     val addr2_read_from_acc = addr2.is_acc_addr
 
     val is_garbage = addr1.is_garbage() || addr2.is_garbage() ||
       !start_inputting1 || !start_inputting2
 
-    !is_garbage && ((addr1_read_from_acc && addr2_read_from_acc) ||
+    val is_being_im2colled = can_be_im2colled.B && im2col_wire//!im2col_wire && im2col_en
+
+    !is_garbage && !is_being_im2colled && ((addr1_read_from_acc && addr2_read_from_acc) ||
       (!addr1_read_from_acc && !addr2_read_from_acc && addr1.sp_bank() === addr2.sp_bank()))
   }
 
@@ -222,40 +271,41 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   val b_ready = WireInit(true.B)
   val d_ready = WireInit(true.B)
 
-  case class Operand(addr: LocalAddr, start_inputting: Bool, counter: UInt, started: Bool, priority: Int) {
+  case class Operand(addr: LocalAddr, start_inputting: Bool, counter: UInt, started: Bool, can_be_im2colled: Boolean, priority: Int) {
     val done = counter === 0.U && started
   }
-  val a_operand = Operand(a_address, start_inputting_a, a_fire_counter, a_fire_started, 0)
-  val b_operand = Operand(b_address, start_inputting_b, b_fire_counter, b_fire_started, 1)
-  val d_operand = Operand(d_address, start_inputting_d, d_fire_counter, d_fire_started, 2)
+  val a_operand = Operand(a_address_rs1, start_inputting_a, a_fire_counter, a_fire_started, true, 0)
+  val b_operand = Operand(b_address_rs2, start_inputting_b, b_fire_counter, b_fire_started, false, 1)
+  val d_operand = Operand(d_address_rs1, start_inputting_d, d_fire_counter, d_fire_started, false, 2)
   val operands = Seq(a_operand, b_operand, d_operand)
 
-  val Seq(a_valid, b_valid, d_valid) = operands.map { case Operand(addr, start_inputting, counter, started, priority) =>
-      val others = operands.filter(_.priority != priority)
+  val Seq(a_valid, b_valid, d_valid) = operands.map { case Operand(addr, start_inputting, counter, started, can_be_im2colled, priority) =>
+    val others = operands.filter(_.priority != priority)
 
-      val same_banks = others.map(o => same_bank(addr, o.addr, start_inputting, o.start_inputting))
-      val same_counter = others.map(o => counter === o.counter)
+    val same_banks = others.map(o => same_bank(addr, o.addr, start_inputting, o.start_inputting, can_be_im2colled || o.can_be_im2colled))
+    val same_counter = others.map(o => counter === o.counter)
 
-      val one_ahead = {
-        if (block_size > 2)
-          others.map(o => counter === wrappingAdd(o.counter, 1.U, block_size))
-        else {
-          others.map(o => (started && !o.started && counter === 1.U && o.counter === 0.U) ||
-            (started && o.started && counter === 0.U && o.counter === 1.U))
-        }
+    val one_ahead = {
+      if (block_size > 2)
+        others.map(o => counter === wrappingAdd(o.counter, 1.U, block_size))
+      else {
+        others.map(o => (started && !o.started && counter === 1.U && o.counter === 0.U) ||
+          (started && o.started && counter === 0.U && o.counter === 1.U))
       }
+    }
 
-      val higher_priorities = others.map(o => (o.priority < priority).B)
+    val higher_priorities = others.map(o => (o.priority < priority).B)
 
-      val must_wait_for = ((same_banks zip same_counter) zip (one_ahead zip higher_priorities)).map {
-        case ((sb, sc), (oa, hp)) =>
-          (sb && hp && sc) || oa
-      }
+    val must_wait_for = ((same_banks zip same_counter) zip (one_ahead zip higher_priorities)).map {
+      case ((sb, sc), (oa, hp)) =>
+        (sb && hp && sc) || oa
+    }
 
-      !must_wait_for.reduce(_ || _)
+    !must_wait_for.reduce(_ || _)
   }
 
   val a_fire = a_valid && a_ready
+  dontTouch(a_fire)
   val b_fire = b_valid && b_ready
   val d_fire = d_valid && d_ready
 
@@ -263,10 +313,8 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
 
   when (!firing) {
     a_fire_counter := 0.U
-    a_addr_offset := 0.U
   }.elsewhen (firing && a_fire && cntl_ready) {
     a_fire_counter := wrappingAdd(a_fire_counter, 1.U, block_size)
-    a_addr_offset := Mux(a_fire_counter === (block_size-1).U, 0.U, a_addr_offset + a_addr_stride)
     a_fire_started := true.B
   }
 
@@ -290,7 +338,7 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     ((b_fire_counter === (block_size-1).U && b_valid) || b_fire_counter === 0.U) &&
     ((d_fire_counter === (block_size-1).U && d_valid) || d_fire_counter === 0.U) &&
     (a_fire_counter =/= 0.U || b_fire_counter =/= 0.U || d_fire_counter =/= 0.U) &&
-    cntl_ready
+    cntl_ready && !io.im2col.resp.bits.continue_fire
 
   if (block_size == 2) {
     when (about_to_fire_all_rows) {
@@ -300,11 +348,40 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     }
   }
 
+  //Seah: for WS propagate unenable
+  when(current_dataflow =/= Dataflow.WS.id.U){
+    prop := in_prop
+  }.otherwise{
+    when(!start_inputting_d) {
+      when(cntl.perform_single_mul && mesh.io.a.valid) {
+        prop_lock := true.B
+        prop := false.B
+      }.elsewhen(!prop_lock) {
+        prop := in_prop
+      }
+    }.otherwise{ // reset propagate signal
+      prop_lock:= false.B
+      prop := in_prop
+    }
+  }
+
+  //Seah: for OS counter address sync
+  val counter_save = WireInit(b_fire_counter)
+  when(io.im2col.resp.bits.im2col_end){
+    when(io.im2col.resp.valid){
+      counter_save := b_fire_counter
+    }.otherwise{
+      counter_save := b_fire_counter - 1.U
+    }
+  }.otherwise{
+    counter_save := b_fire_counter
+  }
+
   // Scratchpad reads
   for (i <- 0 until sp_banks) {
-    val read_a = a_valid && !a_read_from_acc && dataAbank === i.U && start_inputting_a && !multiply_garbage && a_row_is_not_all_zeros
-    val read_b = b_valid && !b_read_from_acc && dataBbank === i.U && start_inputting_b && !accumulate_zeros && b_row_is_not_all_zeros
-    val read_d = d_valid && !d_read_from_acc && dataDbank === i.U && start_inputting_d && !preload_zeros && d_row_is_not_all_zeros
+    val read_a = a_valid && !a_read_from_acc && dataAbank === i.U && start_inputting_a && !multiply_garbage && a_row_is_not_all_zeros && !im2col_wire
+    val read_b = b_valid && !b_read_from_acc && dataBbank === i.U && start_inputting_b && !accumulate_zeros && b_row_is_not_all_zeros //&& !im2col_wire
+    val read_d = d_valid && !d_read_from_acc && dataDbank === i.U && start_inputting_d && !preload_zeros && d_row_is_not_all_zeros //&& !im2col_wire
 
     Seq((read_a, a_ready), (read_b, b_ready), (read_d, d_ready)).foreach { case (rd, r) =>
       when (rd && !io.srams.read(i).req.ready) {
@@ -314,18 +391,20 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
 
     io.srams.read(i).req.valid := read_a || read_b || read_d
     io.srams.read(i).req.bits.fromDMA := false.B
-    io.srams.read(i).req.bits.addr := MuxCase(a_address.sp_row(),
-      Seq(read_b -> b_address.sp_row(),
-        read_d -> d_address.sp_row()))
+    io.srams.read(i).req.bits.addr := MuxCase(a_address_rs1.sp_row() + a_fire_counter,
+      Seq(read_b -> (b_address_rs2.sp_row() + counter_save),
+        read_d -> (d_address_rs1.sp_row() + block_size.U - 1.U - counter_save))) //Seah: fixed for OS b counter sync
+    //      Seq(read_b -> (b_address_rs2.sp_row() + b_fire_counter),
+    //        read_d -> (d_address_rs1.sp_row() + block_size.U - 1.U - d_fire_counter)))
 
     io.srams.read(i).resp.ready := true.B
   }
 
   // Accumulator read
   for (i <- 0 until acc_banks) {
-    val read_a_from_acc = a_valid && a_read_from_acc && dataABankAcc === i.U && start_inputting_a && !multiply_garbage && a_row_is_not_all_zeros
-    val read_b_from_acc = b_valid && b_read_from_acc && dataBBankAcc === i.U && start_inputting_b && !accumulate_zeros && b_row_is_not_all_zeros
-    val read_d_from_acc = d_valid && d_read_from_acc && dataDBankAcc === i.U && start_inputting_d && !preload_zeros && d_row_is_not_all_zeros
+    val read_a_from_acc = a_valid && a_read_from_acc && dataABankAcc === i.U && start_inputting_a && !multiply_garbage && a_row_is_not_all_zeros && !im2col_wire
+    val read_b_from_acc = b_valid && b_read_from_acc && dataBBankAcc === i.U && start_inputting_b && !accumulate_zeros && b_row_is_not_all_zeros //&& !im2col_wire
+    val read_d_from_acc = d_valid && d_read_from_acc && dataDBankAcc === i.U && start_inputting_d && !preload_zeros && d_row_is_not_all_zeros //&& !im2col_wire
 
     Seq((read_a_from_acc, a_ready), (read_b_from_acc, b_ready), (read_d_from_acc, d_ready)).foreach { case (rd, r) =>
       when(rd && !io.acc.read(i).req.ready) {
@@ -336,15 +415,42 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     io.acc.read(i).req.valid := read_a_from_acc || read_b_from_acc || read_d_from_acc
     io.acc.read(i).req.bits.shift := acc_shift
     io.acc.read(i).req.bits.relu6_shift := relu6_shift
+    io.acc.read(i).req.bits.relu6_shift := relu6_shift
     io.acc.read(i).req.bits.act := activation
     io.acc.read(i).req.bits.fromDMA := false.B
-
-    io.acc.read(i).req.bits.addr := MuxCase(a_address.acc_row(),
-      Seq(read_b_from_acc -> b_address.acc_row(),
-        read_d_from_acc -> d_address.acc_row()))
+    io.acc.read(i).req.bits.addr := MuxCase(a_address_rs1.acc_row() + a_fire_counter,
+      Seq(read_b_from_acc -> (b_address_rs2.acc_row() + b_fire_counter),
+        read_d_from_acc -> (d_address_rs1.acc_row() + block_size.U - 1.U - d_fire_counter)))
 
     io.acc.read(i).resp.ready := true.B
   }
+
+  // Im2Col reads
+  {
+    val read_a = a_valid && start_inputting_a && !multiply_garbage && im2col_wire
+
+    when (read_a && !io.im2col.req.ready) {
+      a_ready := false.B
+    }
+    dontTouch(io.im2col.req.ready)
+    dontTouch(read_a)
+
+    io.im2col.req.valid := read_a
+    io.im2col.req.bits.addr := a_address_rs1
+    io.im2col.req.bits.fire_counter := a_fire_counter
+    io.im2col.req.bits.input_width := input_width
+    io.im2col.req.bits.weight_width := weight_width
+    io.im2col.req.bits.channel := channel
+    io.im2col.req.bits.im2col_cmd := im2col_en
+    io.im2col.req.bits.start_inputting := start_inputting_a
+    io.im2col.req.bits.turn := im2col_turn
+    io.im2col.req.bits.ch_per_turn := channel_turn
+    io.im2col.req.bits.row_turn := row_turn
+
+    io.im2col.resp.ready := mesh.io.a.ready
+  }
+  val turn_counter = RegInit(0.U(9.W))
+  val turn_set = RegInit(false.B)
 
   // FSM logic
   switch (control_state) {
@@ -358,11 +464,18 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
       {
         // when(DoConfig && !matmul_in_progress && !pending_completed_rob_id.valid) {
         when(DoConfig && !matmul_in_progress && !pending_completed_rob_ids.map(_.valid).reduce(_ || _)) {
-          activation := rs1s(0)(4, 3) // TODO magic number
+          activation := rs1s(0)(4, 3)
           in_shift := rs2s(0)(31, 0) // TODO magic number
-          acc_shift := rs1s(0)(xLen-1, 32) // TODO magic number
-          relu6_shift := rs2s(0)(xLen-1, 32) // TODO magic number
-          a_addr_stride := rs1s(0)(31, 16) // TODO magic number
+          acc_shift := cmd.bits(0).cmd.rs1(xLen-1, 32) // TODO magic number
+          relu6_shift := cmd.bits(0).cmd.rs2(xLen-1, 32) // TODO magic number
+
+          im2col_en := cmd.bits(0).cmd.rs1(31)
+          //im2col_turn := cmd.bits(0).cmd.rs1(30, 22) //how many 16x16 im2colled block?
+          input_width := cmd.bits(0).cmd.rs1(21, 12)
+          weight_width := cmd.bits(0).cmd.rs2(28, 25) //why (0)??
+          channel := cmd.bits(0).cmd.rs2(21, 12)
+          weight_stride := cmd.bits(0).cmd.rs2(24, 22)
+
 
           if (dataflow == Dataflow.BOTH)
             current_dataflow := rs1s(0)(2)
@@ -371,46 +484,48 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
           io.completed.bits := cmd.bits(0).rob_id
 
           cmd.pop := 1.U
+
+          turn_set := true.B //Seah: added for initializing turn counter
         }
 
-        // Preload
-        .elsewhen(DoPreloads(0) && cmd.valid(1) && !raw_hazard_pre) {
-          perform_single_preload := true.B
-          performing_single_preload := true.B
+          // Preload
+          .elsewhen(DoPreloads(0) && cmd.valid(1) && !raw_hazard_pre) {
+            perform_single_preload := true.B
+            performing_single_preload := true.B
 
-          start_inputting_a := current_dataflow === Dataflow.OS.id.U
-          start_inputting_d := true.B
+            start_inputting_a := current_dataflow === Dataflow.OS.id.U
+            start_inputting_d := true.B
 
-          control_state := compute
-        }
+            control_state := compute
+          }
 
-        // Overlap compute and preload
-        .elsewhen(DoComputes(0) && cmd.valid(1) && DoPreloads(1) && cmd.valid(2) && !raw_hazard_mulpre) {
-          perform_mul_pre := true.B
-          performing_mul_pre := true.B
+          // Overlap compute and preload
+          .elsewhen(DoComputes(0) && cmd.valid(1) && DoPreloads(1) && cmd.valid(2) && !raw_hazard_mulpre) {
+            perform_mul_pre := true.B
+            performing_mul_pre := true.B
 
-          start_inputting_a := true.B
-          start_inputting_b := true.B
-          start_inputting_d := true.B
+            start_inputting_a := true.B
+            start_inputting_b := true.B
+            start_inputting_d := true.B
 
-          control_state := compute
-        }
+            control_state := compute
+          }
 
-        // Single mul
-        .elsewhen(DoComputes(0)) {
-          perform_single_mul := true.B
-          performing_single_mul := true.B
+          // Single mul
+          .elsewhen(DoComputes(0)) {
+            perform_single_mul := true.B
+            performing_single_mul := true.B
 
-          start_inputting_a := current_dataflow === Dataflow.WS.id.U
-          start_inputting_b := true.B
+            start_inputting_a := current_dataflow === Dataflow.WS.id.U
+            start_inputting_b := true.B
 
-          control_state := compute
-        }
+            control_state := compute
+          }
 
-        // Flush
-        .elsewhen(matmul_in_progress) {
-          control_state := flush
-        }
+          // Flush
+          .elsewhen(matmul_in_progress) {
+            control_state := flush
+          }
       }.elsewhen(matmul_in_progress) {
         // TODO code duplication
         control_state := flush
@@ -419,6 +534,9 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     is (compute) {
       // Only preloading
       when(perform_single_preload) {
+        //turn_counter := im2col_turn - 1.U
+        turn_set := false.B
+        row_turn_counter := row_turn // +1??
         start_inputting_a := current_dataflow === Dataflow.OS.id.U
         start_inputting_d := true.B
 
@@ -426,8 +544,6 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
           cmd.pop := 1.U
           control_state := waiting_for_cmd
 
-          // pending_completed_rob_id.valid := c_address_rs2.is_garbage()
-          // pending_completed_rob_id.bits := cmd.bits(0).rob_id
           pending_completed_rob_ids(0).valid := c_address_rs2.is_garbage()
           pending_completed_rob_ids(0).bits := cmd.bits(0).rob_id
 
@@ -437,40 +553,38 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
         }
       }
 
-      // Overlapping
-      .elsewhen(perform_mul_pre) {
-        start_inputting_a := true.B
-        start_inputting_b := true.B
-        start_inputting_d := true.B
+        // Overlapping
+        .elsewhen(perform_mul_pre) {
+          start_inputting_a := true.B
+          start_inputting_b := true.B
+          start_inputting_d := true.B
 
-        when (about_to_fire_all_rows) {
-          cmd.pop := 2.U
-          control_state := waiting_for_cmd
+          when (about_to_fire_all_rows) {
+            cmd.pop := 2.U
+            control_state := waiting_for_cmd
 
-          // pending_completed_rob_id.valid := c_address_rs2.is_garbage()
-          // pending_completed_rob_id.bits := cmd.bits(1).rob_id
-          pending_completed_rob_ids(0).push(cmd.bits(0).rob_id)
-          pending_completed_rob_ids(1).valid := c_address_rs2.is_garbage()
-          pending_completed_rob_ids(1).bits := cmd.bits(1).rob_id
+            pending_completed_rob_ids(0).push(cmd.bits(0).rob_id)
+            pending_completed_rob_ids(1).valid := c_address_rs2.is_garbage()
+            pending_completed_rob_ids(1).bits := cmd.bits(1).rob_id
 
-          when (current_dataflow === Dataflow.OS.id.U) {
-            in_prop_flush := !rs2s(1).asTypeOf(local_addr_t).is_garbage()
+            when (current_dataflow === Dataflow.OS.id.U) {
+              in_prop_flush := !rs2s(1).asTypeOf(local_addr_t).is_garbage()
+            }
           }
         }
-      }
 
-      // Only compute
-      .elsewhen(perform_single_mul) {
-        start_inputting_a := current_dataflow === Dataflow.WS.id.U
-        start_inputting_b := true.B
+        // Only compute
+        .elsewhen(perform_single_mul) {
+          start_inputting_a := current_dataflow === Dataflow.WS.id.U
+          start_inputting_b := true.B
 
-        when (about_to_fire_all_rows) {
-          cmd.pop := 1.U
-          control_state := waiting_for_cmd
+          when (about_to_fire_all_rows) {
+            cmd.pop := 1.U
+            control_state := waiting_for_cmd
 
-          pending_completed_rob_ids(0).push(cmd.bits(0).rob_id)
+            pending_completed_rob_ids(0).push(cmd.bits(0).rob_id)
+          }
         }
-      }
     }
     is (flush) {
       when(mesh.io.flush.fire()) {
@@ -529,6 +643,8 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     val dataflow = UInt(1.W)
     val prop = UInt(1.W)
     val shift = UInt(log2Up(accType.getWidth).W)
+
+    val im2colling = Bool()
   }
 
   mesh_cntl_signals_q.io.enq.valid := computing
@@ -572,20 +688,25 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   mesh_cntl_signals_q.io.enq.bits.rob_id.bits := cmd.bits(preload_cmd_place).rob_id
 
   mesh_cntl_signals_q.io.enq.bits.dataflow := current_dataflow
-  mesh_cntl_signals_q.io.enq.bits.prop := Mux(performing_single_preload, in_prop_flush, in_prop)
+  mesh_cntl_signals_q.io.enq.bits.prop := Mux(performing_single_preload, in_prop_flush, prop)//in_prop)
   mesh_cntl_signals_q.io.enq.bits.shift := in_shift
+
+  mesh_cntl_signals_q.io.enq.bits.im2colling := im2col_wire
 
   val readData = VecInit(io.srams.read.map(_.resp.bits.data))
   val accReadData = VecInit(io.acc.read.map(_.resp.bits.data.asUInt()))
+  val im2ColData = io.im2col.resp.bits.a_im2col.asUInt()
 
   val readValid = VecInit(io.srams.read.map(bank => bank.resp.valid && !bank.resp.bits.fromDMA))
   val accReadValid = VecInit(io.acc.read.map(bank => bank.resp.valid && !bank.resp.bits.fromDMA))
+  val im2ColValid = io.im2col.resp.valid
+  dontTouch(im2ColValid)
 
   mesh_cntl_signals_q.io.deq.ready := (!cntl.a_fire || mesh.io.a.fire() || !mesh.io.a.ready) &&
     (!cntl.b_fire || mesh.io.b.fire() || !mesh.io.b.ready) &&
     (!cntl.d_fire || mesh.io.d.fire() || !mesh.io.d.ready)
 
-  val dataA_valid = cntl.a_garbage || cntl.a_unpadded_cols === 0.U || Mux(cntl.a_read_from_acc, accReadValid(cntl.a_bank_acc), readValid(cntl.a_bank))
+  val dataA_valid = cntl.a_garbage || cntl.a_unpadded_cols === 0.U || Mux(cntl.im2colling, im2ColValid, Mux(cntl.a_read_from_acc, accReadValid(cntl.a_bank_acc), readValid(cntl.a_bank)))
   val dataB_valid = cntl.b_garbage || cntl.b_unpadded_cols === 0.U || MuxCase(readValid(cntl.b_bank), Seq(
     cntl.accumulate_zeros -> false.B,
     cntl.b_read_from_acc -> accReadValid(cntl.b_bank_acc)
@@ -595,7 +716,7 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     cntl.d_read_from_acc -> accReadValid(cntl.d_bank_acc)
   ))
 
-  val dataA_unpadded = Mux(cntl.a_read_from_acc, accReadData(cntl.a_bank_acc), readData(cntl.a_bank))
+  val dataA_unpadded = Mux(cntl.im2colling, im2ColData, Mux(cntl.a_read_from_acc, accReadData(cntl.a_bank_acc), readData(cntl.a_bank)))
   val dataB_unpadded = MuxCase(readData(cntl.b_bank), Seq(cntl.accumulate_zeros -> 0.U, cntl.b_read_from_acc -> accReadData(cntl.b_bank_acc)))
   val dataD_unpadded = MuxCase(readData(cntl.d_bank), Seq(cntl.preload_zeros -> 0.U, cntl.d_read_from_acc -> accReadData(cntl.d_bank_acc)))
 
@@ -606,8 +727,8 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
   when (cntl_valid) {
     // Default inputs
     mesh.io.a.valid := cntl.a_fire && dataA_valid
-    mesh.io.b.valid := cntl.b_fire && dataB_valid
-    mesh.io.d.valid := cntl.d_fire && dataD_valid
+    mesh.io.b.valid := (cntl.b_fire && dataB_valid)
+    mesh.io.d.valid := (cntl.d_fire && dataD_valid)
     mesh.io.tag_in.valid := true.B
 
     mesh.io.a.bits := dataA.asTypeOf(Vec(meshRows, Vec(tileRows, inputType)))
@@ -630,6 +751,26 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     mesh.io.tag_in.bits.addr.make_this_garbage()
   }
 
+  //Seah: added
+  //val overlap_ws = RegInit(rs2s(preload_cmd_place).asTypeOf(local_addr_t))
+  val overlap_ws = RegInit(mesh.io.tag_in.bits)
+  when(perform_single_preload) {
+    overlap_ws.addr := cntl.c_addr
+    overlap_ws.rob_id := cntl.rob_id
+    overlap_ws.cols := cntl.c_cols
+    overlap_ws.rows := cntl.c_rows
+  }
+
+  when (cntl_valid && cntl.perform_single_mul) {
+    mesh.io.a.bits := Mux(cntl.dataflow === Dataflow.OS.id.U, 0.U, dataA.asUInt).asTypeOf(Vec(meshRows, Vec(tileRows, inputType)))
+    when(io.im2col.resp.bits.continue_fire && dataA_valid){
+      mesh.io.tag_in.bits.addr := overlap_ws.addr//cntl.c_addr
+      mesh.io.tag_in.bits.rob_id := overlap_ws.rob_id
+      mesh.io.tag_in.bits.cols := overlap_ws.cols
+      mesh.io.tag_in.bits.rows := overlap_ws.rows
+    }.otherwise{mesh.io.tag_in.bits.addr.make_this_garbage()} //Seah: when statement added (original: only make this garbage)
+  }
+
   // Scratchpad writes
   val w_address = mesh.io.tag_out.addr
   val write_to_acc = w_address.is_acc_addr
@@ -639,7 +780,7 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
 
   val output_counter = new Counter(block_size)
 
-  val current_w_bank_address = Mux(current_dataflow === Dataflow.WS.id.U, w_row + output_counter.value,
+  val current_w_bank_address = Mux(current_dataflow === Dataflow.WS.id.U, w_row + output_counter.value, //+ 16.U * (row_turn - row_turn_counter), //Seah: added for row overflowing at WS
     w_row + block_size.U - 1.U - output_counter.value)
 
   val is_garbage_addr = w_address.is_garbage()
@@ -669,44 +810,168 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     io.srams.write(i).mask := w_mask.flatMap(b => Seq.fill(inputType.getWidth / (aligned_to * 8))(b))
   }
 
+  //Seah: initializing turn counter for accumulator turn
+
+  when(turn_set){
+    turn_counter := im2col_turn - 1.U
+  }
+  /*
+ .elsewhen(is_garbage_addr){
+   turn_counter := im2col_turn - 1.U
+ }
+ */
+  //added for accumulator enable signal
+  val acc_write_en_counter = RegInit(0.U(log2Up(block_size*block_size*block_size).W))
+
   // Write to accumulator
   for (i <- 0 until acc_banks) {
+    when(io.acc.write(i).en){
+      acc_write_en_counter := wrappingAdd(acc_write_en_counter, 1.U, block_size.U*im2col_turn)
+    }
     io.acc.write(i).en := start_array_outputting && w_bank === i.U && write_to_acc && !is_garbage_addr && write_this_row
     io.acc.write(i).addr := current_w_bank_address
-    io.acc.write(i).data := VecInit(mesh.io.out.bits.map(v => VecInit(v.map(e => e.withWidthOf(accType)))))
-    io.acc.write(i).acc := w_address.accumulate
+    io.acc.write(i).data := mesh.io.out.bits
+    when(im2col_turn > 1.U) { //Seah: added for WS accumulator
+      //when(turn_counter + 1.U < im2col_turn){
+      when(acc_write_en_counter > block_size.U - 1.U){
+        io.acc.write(i).acc := true.B //adding things
+      }.otherwise{
+        io.acc.write(i).acc := w_address.accumulate
+      }
+    }.otherwise{
+      io.acc.write(i).acc := w_address.accumulate //when only one im2col matrix
+    }
+    // io.acc.write(i).mask := VecInit(Seq.fill(io.acc.write(0).mask.length)(true.B))
     io.acc.write(i).mask := w_mask.flatMap(b => Seq.fill(accType.getWidth / (aligned_to * 8))(b))
   }
 
   // Handle dependencies and turn off outputs for garbage addresses
   val mesh_completed_rob_id_fire = WireInit(false.B)
+  val complete_lock = RegInit(false.B)
 
+  //Seah: added for WS accumulator
   when(mesh.io.out.fire() && mesh.io.tag_out.rob_id.valid) {
-    when(output_counter.inc()) {
-      mesh_completed_rob_id_fire := true.B
-      io.completed.valid := true.B
-      io.completed.bits := mesh.io.tag_out.rob_id.bits
-    }
+    when(current_dataflow === Dataflow.WS.id.U) {
+      when(output_counter.inc()) {
 
+        /*
+        when(im2col_turn === 1.U){
+          mesh_completed_rob_id_fire := true.B
+          io.completed.valid := true.B
+          io.completed.bits := mesh.io.tag_out.rob_id.bits
+        }.otherwise{
+          when(io.im2col.resp.bits.row_turn === row_turn){ // last gemmini_compute
+            when(turn_counter =/= 0.U){
+              turn_counter := turn_counter - 1.U
+            }.otherwise {
+              when(io.im2col.resp.bits.im2col_turn === 0.U) { //very last turn
+                mesh_completed_rob_id_fire := true.B
+                io.completed.valid := true.B
+                io.completed.bits := mesh.io.tag_out.rob_id.bits
+              }
+            }
+          }.otherwise{ //not for last computation
+            when(turn_counter === 1.U){
+              turn_counter := turn_counter - 1.U
+              mesh_completed_rob_id_fire := true.B
+              io.completed.valid := true.B
+              io.completed.bits := mesh.io.tag_out.rob_id.bits
+            }.elsewhen(turn_counter =/= 0.U){
+              turn_counter := turn_counter - 1.U
+            }
+          }
+        }
+*/
+
+        when(turn_counter === 0.U || turn_counter === 1.U){
+          when(!complete_lock){
+            mesh_completed_rob_id_fire := true.B
+            io.completed.valid := true.B
+            io.completed.bits := mesh.io.tag_out.rob_id.bits
+            complete_lock := true.B
+          }
+        }
+        /*
+        when(!complete_lock) {
+          when(turn_counter === im2col_turn - 1.U) {
+            mesh_completed_rob_id_fire := true.B
+            io.completed.valid := true.B
+            io.completed.bits := mesh.io.tag_out.rob_id.bits
+            complete_lock := true.B
+          }
+        }.otherwise {
+          complete_lock := false.B
+          when(turn_counter === 0.U) {
+            mesh_completed_rob_id_fire := true.B
+            io.completed.valid := true.B
+            io.completed.bits := mesh.io.tag_out.rob_id.bits
+            complete_lock := true.B
+          }.elsewhen(turn_counter === im2col_turn - 1.U){complete_lock := true.B}
+        }
+         */
+
+      }
+    }.otherwise{ // OS - not yet
+      when(output_counter.inc()){
+        mesh_completed_rob_id_fire := true.B
+        io.completed.valid := true.B
+        io.completed.bits := mesh.io.tag_out.rob_id.bits
+      }
+    }
     start_array_outputting :=  !is_garbage_addr
   }
 
-  /*
-  when (pending_completed_rob_id.valid && !mesh_completed_rob_id_fire) {
-    io.completed.valid := true.B
-    io.completed.bits := pending_completed_rob_id.pop()
+
+  when(io.im2col.resp.bits.im2col_end_reg && turn_counter =/= 0.U){
+    turn_counter := turn_counter - 1.U
+  }.elsewhen(performing_single_preload && turn_counter === 0.U ){//&& io.im2col.resp.bits.row_turn =/= row_turn){ //end of block: turn_counter stay at 0
+    turn_counter := im2col_turn - 1.U
+    complete_lock := false.B
   }
-  */
+
 
   when (!mesh_completed_rob_id_fire) {
-    when (pending_completed_rob_ids(0).valid) {
+    when(pending_completed_rob_ids(0).valid) {
       io.completed.valid := true.B
       io.completed.bits := pending_completed_rob_ids(0).pop()
-    }.elsewhen (pending_completed_rob_ids(1).valid) {
+    }.elsewhen(pending_completed_rob_ids(1).valid) {
       io.completed.valid := true.B
       io.completed.bits := pending_completed_rob_ids(1).pop()
     }
   }
+
+
+  /*
+          when(turn_counter =/= 0.U) {
+            turn_counter := turn_counter - 1.U
+          }.otherwise { //when everything is finished
+            mesh_completed_rob_id_fire := true.B
+            io.completed.valid := true.B
+            io.completed.bits := mesh.io.tag_out.rob_id.bits
+          }
+        }
+      }.otherwise{ // OS - not yet
+        when(output_counter.inc()){
+          mesh_completed_rob_id_fire := true.B
+          io.completed.valid := true.B
+          io.completed.bits := mesh.io.tag_out.rob_id.bits
+        }
+      }
+      start_array_outputting :=  !is_garbage_addr
+    }
+    when (!mesh_completed_rob_id_fire) {
+      // when(io.im2col.resp.bits.im2col_turn === 0.U) { //Seah: added for same reason
+      when(turn_counter === 0.U){
+        when(pending_completed_rob_ids(0).valid) {
+          io.completed.valid := true.B
+          io.completed.bits := pending_completed_rob_ids(0).pop()
+        }.elsewhen(pending_completed_rob_ids(1).valid) {
+          io.completed.valid := true.B
+          io.completed.bits := pending_completed_rob_ids(1).pop()
+        }
+      }
+    }
+   */
 
   when (reset.toBool()) {
     // pending_completed_rob_id.valid := false.B
