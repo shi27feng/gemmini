@@ -5,6 +5,7 @@ import chisel3.util._
 import GemminiISA._
 import Util._
 import freechips.rocketchip.config.Parameters
+import midas.targetutils.PerfCounter
 
 // TODO do we still need to flush when the dataflow is weight stationary? Won't the result just keep travelling through on its own?
 class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: GemminiArrayConfig[T, U])
@@ -712,4 +713,11 @@ class ExecuteController[T <: Data, U <: Data](xLen: Int, tagWidth: Int, config: 
     // pending_completed_rob_id.valid := false.B
     pending_completed_rob_ids.foreach(_.valid := false.B)
   }
+                                    
+  val incr_waiting_for_mesh_cycle_counter = !perform_single_preload && !perform_mul_pre && !perform_single_mul && matmul_in_progress                                  
+                                    
+  PerfCounter(perform_single_preload, "pre_cnt", "how many cycles did we preload only?")
+  PerfCounter(perform_single_mul, "mul_cnt", "how many cycles did we only multiply?")
+  PerfCounter(perform_mul_pre, "mul_pre_cnt", "how many cycles did we both preload and multiply?")
+  PerfCounter(incr_waiting_for_mesh_cycle_counter, "mesh_waiting_cnt", "how many cycles do we wait for the mesh?")
 }
