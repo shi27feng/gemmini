@@ -40,6 +40,8 @@ class ScratchpadMemWriteRequest(local_addr_t: LocalAddr)
   val pool_en = Bool()
   val store_en = Bool()
 
+  val row_point = Vec(4, UInt(1.W)) //added for mask sampling
+
   override def cloneType: this.type = new ScratchpadMemWriteRequest(local_addr_t).asInstanceOf[this.type]
 }
 
@@ -213,6 +215,7 @@ class Scratchpad[T <: Data: Arithmetic, U <: Data](config: GemminiArrayConfig[T,
     writer.module.io.req.bits.status := write_issue_q.io.deq.bits.status
     writer.module.io.req.bits.pool_en := write_issue_q.io.deq.bits.pool_en
     writer.module.io.req.bits.store_en := write_issue_q.io.deq.bits.store_en
+    writer.module.io.req.bits.row_point := write_issue_q.io.deq.bits.row_point
 
     io.dma.write.resp.valid := false.B
     io.dma.write.resp.bits.cmd_id := write_dispatch_q.bits.cmd_id
