@@ -9,13 +9,13 @@ import freechips.rocketchip.config._
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tile._
 import GemminiISA._
+import Util._
 
 import midas.targetutils.PerfCounter
 
-
 class GemminiCmd(rob_entries: Int)(implicit p: Parameters) extends Bundle {
   val cmd = new RoCCCommand
-  val rob_id = UInt(log2Up(rob_entries).W)
+  val rob_id = UDValid(UInt(log2Up(rob_entries).W))
 
   override def cloneType: this.type = (new GemminiCmd(rob_entries)).asInstanceOf[this.type]
 }
@@ -147,19 +147,19 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data]
   rob.io.issue.ld.ready := load_controller.io.cmd.ready
   load_controller.io.cmd.bits.cmd := rob.io.issue.ld.cmd
   load_controller.io.cmd.bits.cmd.inst.funct := rob.io.issue.ld.cmd.inst.funct
-  load_controller.io.cmd.bits.rob_id := rob.io.issue.ld.rob_id
+  load_controller.io.cmd.bits.rob_id.push(rob.io.issue.ld.rob_id)
 
   store_controller.io.cmd.valid := rob.io.issue.st.valid
   rob.io.issue.st.ready := store_controller.io.cmd.ready
   store_controller.io.cmd.bits.cmd := rob.io.issue.st.cmd
   store_controller.io.cmd.bits.cmd.inst.funct := rob.io.issue.st.cmd.inst.funct
-  store_controller.io.cmd.bits.rob_id := rob.io.issue.st.rob_id
+  store_controller.io.cmd.bits.rob_id.push(rob.io.issue.st.rob_id)
 
   ex_controller.io.cmd.valid := rob.io.issue.ex.valid
   rob.io.issue.ex.ready := ex_controller.io.cmd.ready
   ex_controller.io.cmd.bits.cmd := rob.io.issue.ex.cmd
   ex_controller.io.cmd.bits.cmd.inst.funct := rob.io.issue.ex.cmd.inst.funct
-  ex_controller.io.cmd.bits.rob_id := rob.io.issue.ex.rob_id
+  ex_controller.io.cmd.bits.rob_id.push(rob.io.issue.ex.rob_id)
   // ex_controller.io.cmd <> decompressed_cmd
 
   // Wire up scratchpad to controllers
@@ -193,7 +193,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data]
   io.interrupt := tlb.io.exp.interrupt
 
   rob.io.solitary_preload := ex_controller.io.solitary_preload
-  
+
   // Cycle counters
   val ld_cycles = RegInit(0.U(34.W))
   val st_cycles = RegInit(0.U(34.W))
@@ -230,7 +230,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data]
   }.elsewhen (incr_ld_st_ex_cycles) {
     ld_st_ex_cycles := ld_st_ex_cycles + 1.U
   }
-      
+
   PerfCounter(incr_ld_cycles, "ld_cycles_cnt", "cycles where only load-controller is busy")
   PerfCounter(incr_st_cycles, "st_cycles_cnt", "cycles where only store-controller is busy")
   PerfCounter(incr_ex_cycles, "ex_cycles_cnt", "cycles where only execute-controller is busy")
