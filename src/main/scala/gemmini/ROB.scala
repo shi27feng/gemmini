@@ -45,7 +45,7 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
   val q_t = ldq.cloneType
 
   class Entry extends Bundle {
-    val q = q_t.cloneType
+    val q = q_t.cloneType //controller
 
     val is_config = Bool()
 
@@ -53,21 +53,21 @@ class ROB(cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, block_rows
     val op2 = UDValid(local_addr_t.cloneType)
     // val op3 = UDValid(local_addr_t.cloneType)
 
-    val dst = UDValid(new Bundle {
+    val dst = UDValid(new Bundle { //dest spad address
       val start = local_addr_t.cloneType
-      val len = UInt(8.W) // TODO magic number
+      val len = UInt(8.W) // TODO magic number (write more than 1)
 
       def end(dummy: Int = 0) = start + len * block_rows.U
     })
 
     val issued = Bool()
 
-    val complete_on_issue = Bool()
+    val complete_on_issue = Bool() //can delete after issue
 
     val cmd = cmd_t.cloneType
 
-    val deps = Vec(nEntries, Bool())
-    def ready(dummy: Int = 0): Bool = !deps.reduce(_ || _)
+    val deps = Vec(nEntries, Bool()) //other command dependent on
+    def ready(dummy: Int = 0): Bool = !deps.reduce(_ || _) //no dependency, can run
   }
 
   val entries = Reg(Vec(nEntries, UDValid(new Entry)))
