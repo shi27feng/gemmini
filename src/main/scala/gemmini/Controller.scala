@@ -128,15 +128,11 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data]
   // compressed_cmd.ready := false.B
   unrolled_cmd.ready := false.B
 
-  val rob = Module(new ROB(new RoCCCommand, rob_entries, local_addr_t, meshRows*tileRows, meshColumns*tileColumns))
-  // val cmd_decompressor = Module(new InstDecompressor(rob_entries))
+  //val rob = Module(new ROB(new RoCCCommand, rob_entries, local_addr_t, meshRows*tileRows, meshColumns*tileColumns))
+  //TODO: new issue queue
+  val isque_mvin = Module(new QueueMvin(new RoCCCommand, rob_entries, local_addr_t, meshRows*tileRows, meshColumns*tileColumns))
+  val isque_compute = Module(new QueueCompute(new RoCCCommand, rob_entries, local_addr_t, meshRows*tileRows, meshColumns*tileColumns))
 
-  // cmd_decompressor.io.in.valid := rob.io.issue.ex.valid
-  // cmd_decompressor.io.in.bits.cmd := rob.io.issue.ex.cmd
-  // cmd_decompressor.io.in.bits.rob_id := rob.io.issue.ex.rob_id
-  // rob.io.issue.ex.ready := cmd_decompressor.io.in.ready
-
-  // val decompressed_cmd = cmd_decompressor.io.out
 
   // Controllers
   val load_controller = Module(new LoadController(outer.config, coreMaxAddrBits, local_addr_t))
