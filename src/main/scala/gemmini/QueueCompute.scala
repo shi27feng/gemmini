@@ -15,6 +15,8 @@ class QueueCompute (cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, 
     val alloc = Flipped(Decoupled(cmd_t.cloneType))
 
     val completed = Flipped(Valid(UInt(log2Up(nEntries).W)))
+    val local_address_pointer_A = Input(local_addr_t)
+    val local_address_pointer_B = Input(local_addr_t)
 
     val issue = new Bundle {
       val st = new ROBIssue(cmd_t, nEntries)
@@ -54,15 +56,16 @@ class QueueCompute (cmd_t: RoCCCommand, nEntries: Int, local_addr_t: LocalAddr, 
   val entries = Reg(Vec(nEntries, UDValid(new Entry)))
   //when do we use Module(class), Bundle (struct), Vec?
 
-  val entry_that_is_ready = MuxCase(entries.last, entries.map(e => (e.bits.op1 >= counter) -> e))
-  val entry_that_is_ready_valid = entries.map(e => e.bits.op1 >= counter).reduce(_ || _)
+  val entry_that_is_ready = MuxCase(entries.last, entries.map(e => (e.bits.op1.bits.data >= io.local_address_pointer_A.data && e.bits.op2.bits.data >= io.local_address_pointer_B.data) -> e))
+  //is this right? (.bits.data)
+  val entry_that_is_ready_valid = entries.map(e => (e.bits.op1.bits.data >= io.local_address_pointer_A.data && e.bits.op2.bits.data >= io.local_address_pointer_B.data)).reduce(_ || _)
 
   val empty = !entries.map(_.valid).reduce(_ || _)
   val full = entries.map(_.valid).reduce(_ && _)
 
   io.issue.ex := DontCare
   io.issue.ex.valid := entry_that_is_ready_valid
-  io.issue.ex.cmd.inst.funct := Mux(entry_that_is_ready.needs_to_preload, PRELOAD_CMD, COMPUTE_AND_FLIP_CMD)
+  io.issue.ex.cmd.inst.funct := Mux(entry_that_is_ready.bits.needs_to_preload, PRELOAD_CMD, COMPUTE_AND_FLIP_CMD)
 
   when (io.issue.ex.fire()) {
     entry_that_is_ready.bits.needs_to_preload := ~entry_that_is_ready.bits.needs_to_preload
